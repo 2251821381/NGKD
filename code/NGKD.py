@@ -2,32 +2,48 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-def dgkd_loss(logits_mlp, logits_gnn, target, alpha, beta, temperature):
-    gt_mask = _get_gt_mask(logits_mlp, target)
-    other_mask = _get_other_mask(logits_gnn, target)
-    pred_mlp = F.softmax(logits_mlp / temperature, dim=1)
-    pred_gnn = F.softmax(logits_gnn / temperature, dim=1)
-    pred_mlp = cat_mask(pred_mlp, gt_mask, other_mask)
-    pred_gnn = cat_mask(pred_gnn, gt_mask, other_mask)
-    log_pred_mlp = torch.log(pred_mlp)
-    tcgd_loss = (
-        F.kl_div(log_pred_mlp, pred_gnn, size_average=False)
-        * (temperature**2)
-        / target.shape[0]
-    )
-    pred_gnn_part2 = F.softmax(
-        logits_gnn / temperature - 1000.0 * gt_mask, dim=1
-    )
-    log_pred_mlp_part2 = F.log_softmax(
-        logits_mlp / temperature - 1000.0 * gt_mask, dim=1
-    )
-    ncgd_loss = (
-        F.kl_div(log_pred_mlp_part2, pred_gnn_part2, size_average=False)
-        * (temperature**2)
-        / target.shape[0]
-    )
-    return alpha * tcgd_loss + beta * ncgd_loss
+class NKDLoss(nn.Module):
+    """ PyTorch version of NKD """
 
+    def __init__(self,
+                 temp=1.0,
+                 gamma=1.5,
+                 ):
+        super(NKDLoss, self).__init__()
+
+        self.temp = temp
+        self.gamma = gamma
+        self.log_softmax = nn.LogSoftmax(dim=1)
+
+    def forward(self, logit_s, logit_t, gt_label):
+
+        if len(gt_label.size()) > 1:
+            label = torch.max(gt_label, dim=1, keepdim=True)[1]
+        else:
+            label = gt_label.view(len(gt_label), 1)
+
+        # N*class
+        N, c = logit_s.shape
+        s_i = self.log_softmax(logit_s)
+        t_i = F.softmax(logit_t, dim=1)
+        # N*1
+        s_t = torch.gather(s_i, 1, label)
+        t_t = torch.gather(t_i, 1, label).detach()
+
+        loss_t = - (t_t * s_t).mean()
+
+        mask = torch.ones_like(logit_s).scatter_(1, label, 0).bool()
+        logit_s = logit_s[mask].reshape(N, -1)
+        logit_t = logit_t[mask].reshape(N, -1)
+
+        # N*class
+        S_i = self.log_softmax(logit_s / self.temp)
+        T_i = F.softmax(logit_t / self.temp, dim=1)
+
+        loss_non = (T_i * S_i).sum(dim=1).mean()
+        loss_non = - self.gamma * (self.temp ** 2) * loss_non
+
+        return loss_t + loss_non
 
 def _get_gt_mask(logits, target):
     target = target.reshape(-1)
@@ -46,3 +62,6 @@ def cat_mask(t, mask1, mask2):
     t2 = (t * mask2).sum(1, keepdims=True)
     rt = torch.cat([t1, t2], dim=1)
     return rt
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
